@@ -34,3 +34,6 @@
 # mac stuff
 *.DS_Store
 *.dSYM
+
+# vscode stuff
+.vscode
