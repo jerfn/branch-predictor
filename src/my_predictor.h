@@ -14,24 +14,26 @@ Code has been largely inspired  by the tagged PPM predictor simulator from Pierr
 #define TBITS 7			// minimum tag width (shortest history length table)
 #define MINHIST 4		// shortest history length
 #define MAXHIST 640		// longest history length
-
-#define LOGL 8			//256 entries loop predictor
-#define WIDTHNBITERLOOP 14
-//Total storage for the submitted predictor
-//TAGE
-//Table T0: 20Kbits (16K prediction + 4K hysteresis)
-//Tables T1 and T2: 12Kbits each; Tables T3 and T4: 26 Kbits each; Table T5: 28Kbits; Table  T6: 30Kbits; Table T7: 16 Kbits  ;  Tables T8 and  T9: 17 Kbits each, Table T10: 18 Kbits;  Table T11: 9,5 Kbits; Table T12 10 Kbits
-// Total of storage for the TAGE tables: 239,5 Kbits
-//Loop predictor: 256 entries * 52 bits= 13 Kbits
-// Total of storage for the TAGE tables: 241,5 Kbits + 13 Kbits = 260,608 bits
-//Extra storage: 2*640 history bits + 2*16 path history bits + 4 bits for  USE_ALT_ON_NA + 19 bits for the TICK counter + 2 bits for Seed in the "pseudo-random" counter= 1,337 bits + 7bits on the WITHLOOP counter = 1,344 bits
-//Total storage= 260,608 + 1,344 = 261,952 bits
-
 #define CWIDTH 3		// predictor counter width on the tagged tables
+
+// 256 entries loop predictor
+#define LOGL 8			
+#define WIDTHNBITERLOOP 14
+// Total storage for the submitted predictor
+// TAGE
+// Table T0: 20Kbits (16K prediction + 4K hysteresis)
+// Tables T1 and T2: 12Kbits each; Tables T3 and T4: 26 Kbits each; Table T5: 28Kbits; Table  T6: 30Kbits; Table T7: 16 Kbits  ;  Tables T8 and  T9: 17 Kbits each, Table T10: 18 Kbits;  Table T11: 9,5 Kbits; Table T12 10 Kbits
+// Total of storage for the TAGE tables: 239,5 Kbits
+
+// Loop predictor: 256 entries * 52 bits= 13 Kbits
+// Total of storage for the TAGE tables: 241,5 Kbits + 13 Kbits = 260,608 bits
+// Extra storage: 2*640 history bits + 2*16 path history bits + 4 bits for  USE_ALT_ON_NA + 19 bits for the TICK counter + 2 bits for Seed in the "pseudo-random" counter= 1,337 bits + 7bits on the WITHLOOP counter = 1,344 bits
+// Total storage= 260,608 + 1,344 = 261,952 bits
+
 typedef uint32_t address_t;
 
 #define BUFFERHIST 128 * 1024
-//size of the history buffer: to allow fast management we use a very large buffer //we replace a global shift by a pointer management
+// size of the history buffer: to allow fast management we use a very large buffer //we replace a global shift by a pointer management
 
 // utility class for index computation
 // this is the cyclic shift register for folding a long global history into a smaller number of bits; see P. Michaud's PPM-like predictor at CBP-1
@@ -69,7 +71,7 @@ public:
 branch_update u;
 branch_info bi;
 
-//loop predictor entry
+// loop predictor entry
 class lentry			
 {
 public:
