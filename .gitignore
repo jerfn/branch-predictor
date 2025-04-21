@@ -37,3 +37,6 @@
 
 # vscode
 .vscode
+
+# binary
+src/predict

@@ -107,7 +107,8 @@ public:
 	branch_update *predict (branch_info & b) {
 		bi = b;
 		if (b.br_flags & BR_CONDITIONAL) { // if conditional branch
-			u.index = b.address % NUM_PERCEPTRONS;
+			// u.index = b.address % NUM_PERCEPTRONS;
+			u.index = (b.address ^ ghist.to_ulong()) % NUM_PERCEPTRONS;
 			perceptron& p = table[u.index];
 			u.direction_prediction (p.predict(ghist) >= 0);
 		} else {
