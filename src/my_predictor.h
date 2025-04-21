@@ -24,8 +24,9 @@ Code has been largely inspired  by the tagged PPM predictor simulator from Pierr
 // static length perceptron 
 #define P_LENGTH 64		// perceptron length
 #define WEIGHT_BITS 8	// using int8_t for weights
-#define TAGE_CONFIDENCE_THRESHOLD 20 // if TAGE confidence is less than this value and perceptron prediction above threshold, use perceptron prediction.
-#define PERCEPTRON_THRESHOLD 30		// threshold to use perceptron prediction
+#define TAGE_CONFIDENCE_THRESHOLD -2 // if TAGE confidence is less than this value and perceptron prediction above threshold, use perceptron prediction.
+#define PERCEPTRON_THRESHOLD 110		// threshold to use perceptron prediction
+// #define THRESHOLD_TESTING // define to test perceptron prediction threshold (removes TAGE fallback)
 
 // Total storage for the L-TAGE predictor
 // TAGE
@@ -186,6 +187,7 @@ int AltBank;			// alternate matching bank
 
 bool loop_pred;		// loop predictor prediction
 int perceptron_pred;	// perceptron prediction
+bool perceptron_used; 	// perceptron prediction used
 int LI;			//index of the loop predictor
 int LHIT;			//hitting way in the loop predictor
 int LTAG;			//tag on the loop predictor
@@ -637,12 +639,23 @@ branch_update *predict (branch_info & b)
 
 		loop_pred = getloop (pc);	// loop prediction
 		perceptron_pred = getperceptron (pc); 	// perceptron prediction
+		perceptron_used = false;
 
 		// select prediction taken using loop, perceptron, TAGE confidences
 		if ((WITHLOOP >= 0) && (LVALID))
 			pred_taken = loop_pred;
-		else if (tage_confidence < TAGE_CONFIDENCE_THRESHOLD && abs(perceptron_pred > PERCEPTRON_THRESHOLD))
+	#ifdef THRESHOLD_TESTING
+		else if (1)
+		{
 			pred_taken = (perceptron_pred >= 0);
+			perceptron_used = true;
+		}
+	#endif
+		else if (tage_confidence < TAGE_CONFIDENCE_THRESHOLD && abs(perceptron_pred > PERCEPTRON_THRESHOLD))
+		{
+			pred_taken = (perceptron_pred >= 0);
+			perceptron_used = true;
+		}
 		else 
 			pred_taken = tage_pred;
 
@@ -669,7 +682,7 @@ void update (branch_update * u, bool taken, unsigned int target)
 			ctrupdate (WITHLOOP, (loop_pred == taken), 7);
 
 		// train perceptron when TAGE prediction incorrect or when perceptron was used as final predictor
-		if ( (tage_pred != taken) || (tage_confidence < TAGE_CONFIDENCE_THRESHOLD && abs(perceptron_pred > PERCEPTRON_THRESHOLD)) )
+		if ( (tage_pred != taken) || (perceptron_used) )
 			perceptronupdate(pc, taken);
 
 		// BEGIN TAGE UPDATE  
