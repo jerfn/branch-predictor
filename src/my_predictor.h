@@ -5,6 +5,7 @@ Code has been largely inspired  by the tagged PPM predictor simulator from Pierr
 // my_predictor.h
 #include <inttypes.h>
 #include <math.h>
+#include <algorithm>
 
 //a limit predictor for 256Kbits: no AHEAD pipelining, 13 components
 #define NHIST 12		//12 tagged components
@@ -19,7 +20,14 @@ Code has been largely inspired  by the tagged PPM predictor simulator from Pierr
 // 256 entries loop predictor
 #define LOGL 8			
 #define WIDTHNBITERLOOP 14
-// Total storage for the submitted predictor
+
+// static length perceptron 
+#define P_LENGTH 64		// perceptron length
+#define WEIGHT_BITS 8	// using int8_t for weights
+#define TAGE_CONFIDENCE_THRESHOLD 20 // if TAGE confidence is less than this value and perceptron prediction above threshold, use perceptron prediction.
+#define PERCEPTRON_THRESHOLD 30		// threshold to use perceptron prediction
+
+// Total storage for the L-TAGE predictor
 // TAGE
 // Table T0: 20Kbits (16K prediction + 4K hysteresis)
 // Tables T1 and T2: 12Kbits each; Tables T3 and T4: 26 Kbits each; Table T5: 28Kbits; Table  T6: 30Kbits; Table T7: 16 Kbits  ;  Tables T8 and  T9: 17 Kbits each, Table T10: 18 Kbits;  Table T11: 9,5 Kbits; Table T12 10 Kbits
@@ -117,7 +125,21 @@ public:
 	{
 		ctr = 0;
 		tag = 0;
-		u = 0;
+		u = 0;	// usefulness bit, maxes at 3
+	}
+};
+
+// perceptron 
+class perceptron
+{
+public:
+	int8_t weights[P_LENGTH];
+	int bias;
+	perceptron () 
+	{
+		for (int i = 0; i < P_LENGTH; i++)
+			weights[i] = 0;
+		bias = 0;
 	}
 };
 
@@ -125,7 +147,7 @@ int USE_ALT_ON_NA;		// "Use alternate prediction on newly allocated":  a 4-bit c
 
 int TICK, LOGTICK;		//control counter for the smooth resetting of useful counters
 
-int phist;			// use a path history as on  the OGEHL predictor
+int phist;			// use a path history as on the OGEHL predictor
 //for managing global history  
 uint8_t *GHIST;
 uint8_t *ghist;
@@ -142,9 +164,11 @@ folded_history ch_t[2][NHIST + 1];	// utility for computing TAGE tags
 
 folded_history ch_ios[NHIST + 1];	// utility for computing TAGE indices on kernel branches
 folded_history ch_tos[2][NHIST + 1];	// utility for computing TAGE tags on kernel branches
+
 lentry *ltable;		// loop predictor table
 bentry *btable;		// bimodal TAGE table
 gentry *gtable[NHIST + 1];	// tagged TAGE tables
+perceptron perry;
 
 int TB[NHIST + 1];		// tag width for the different tagged tables
 int m[NHIST + 1];		// used for storing the history lengths
@@ -156,10 +180,12 @@ int Seed;			// for the pseudo-random number generator
 bool pred_taken;		// prediction
 bool alttaken;		// alternate  TAGEprediction
 bool tage_pred;		// TAGE prediction
+int tage_confidence;	// TAGE confidence
 int HitBank;			// longest matching bank
 int AltBank;			// alternate matching bank
 
-bool predloop;		// loop predictor prediction
+bool loop_pred;		// loop predictor prediction
+int perceptron_pred;	// perceptron prediction
 int LI;			//index of the loop predictor
 int LHIT;			//hitting way in the loop predictor
 int LTAG;			//tag on the loop predictor
@@ -238,11 +264,13 @@ my_predictor (void)
 
 	// allocation of TAGE predictor tables
 	btable = new bentry[1 << LOGB];
-
 	for (int i = 1; i <= NHIST; i++)
 	{
 		gtable[i] = new gentry[1 << (logg[i])];
 	}
+
+	// initialization of perceptron
+	perry = perceptron ();
 
 //#define PRINTCHAR
 #ifdef PRINTCHAR
@@ -311,7 +339,8 @@ uint16_t gtag (address_t pc, int bank)
 	int tag = pc ^ ch_t[0][bank].comp ^ (ch_t[1][bank].comp << 1);
 	return (tag & ((1 << TB[bank]) - 1));
 }
-// index computation for kernel branchs 
+
+// index computation for kernel branch
 int gindexos (address_t pc, int bank)
 {
 	int index;
@@ -336,6 +365,7 @@ void ctrupdate (int8_t & ctr, bool taken, int nbits)
 		ctr--;
 }
 
+// predictor helper functions
 // get bimodal prediction
 bool getbim (address_t pc)
 {
@@ -354,7 +384,7 @@ void baseupdate (address_t pc, bool Taken)
 	btable[BI >> HYSTSHIFT].hyst = (inter & 1);
 }
 
-// loop prediction: only used if high confidence
+// get loop prediction: only used if high confidence
 bool getloop (address_t pc)
 {
 	LHIT = -1;
@@ -378,7 +408,8 @@ bool getloop (address_t pc)
 	return (false);
 
 }
-// loop predictor update
+
+// update loop predictor
 void loopupdate (address_t pc, bool Taken)
 {
 	if (LHIT >= 0)
@@ -386,7 +417,7 @@ void loopupdate (address_t pc, bool Taken)
 		// if hit 
 		if (LVALID)
 		{
-			if (Taken != predloop)
+			if (Taken != loop_pred)
 			{
 				// free the entry
 				ltable[LI + LHIT].NbIter = 0;
@@ -395,7 +426,7 @@ void loopupdate (address_t pc, bool Taken)
 				ltable[LI + LHIT].CurrentIter = 0;
 				return;
 			}
-			else if ((predloop != tage_pred) && (ltable[LI + LHIT].age < 255))
+			else if ((loop_pred != tage_pred) && (ltable[LI + LHIT].age < 255))
 				ltable[LI + LHIT].age++;
 		}
 
@@ -469,6 +500,34 @@ void loopupdate (address_t pc, bool Taken)
 				ltable[LI + LHIT].age--;
 		}
 	}
+}
+
+// calculate perceptron prediction 
+int getperceptron (address_t pc)
+{
+	int sum = perry.bias;
+	for (int i = 0; i < P_LENGTH; i++)
+	{
+		int input = ghist[i] ? 1 : -1;
+		sum += input * perry.weights[i];
+	}
+	return sum;
+}
+
+void perceptronupdate (address_t pc, bool Taken)
+{
+	int prediction = getperceptron (pc);
+	bool predicted = prediction >= 0;
+	if (predicted == Taken && abs(prediction) > PERCEPTRON_THRESHOLD)
+		return; // correct prediction & confident, no additional training needed
+	
+	int target = Taken ? 1 : -1;
+	for (int i = 0; i < P_LENGTH; i++) 
+	{
+		int input = ghist[i] ? 1 : -1;
+		perry.weights[i] = std::clamp(perry.weights[i] + target * input, -127, 127);
+	}
+	perry.bias = std::clamp(perry.bias + target, -127, 127);
 }
 
 // shifting the global history:  we manage the history in a big table in order to reduce simulation time
@@ -552,21 +611,41 @@ branch_update *predict (branch_info & b)
 				alttaken = getbim (pc);
 
 			// if the entry is recognized as a newly allocated entry and 
-			// USE_ALT_ON_NA is positive  use the alternate prediction
-			if ((USE_ALT_ON_NA < 0) || (abs (2 * gtable[HitBank][GI[HitBank]].ctr + 1) > 1))
-				tage_pred = (gtable[HitBank][GI[HitBank]].ctr >= 0);
-			else
+			// USE_ALT_ON_NA is positive use the alternate prediction
+			tage_pred = (gtable[HitBank][GI[HitBank]].ctr >= 0);
+
+			// calculate some confidence value (might be mickey)
+			// max confidence of 16 (+4 from strength, +3*2 from useful and long history, +3 from matching alt prediction)
+			tage_confidence = abs(gtable[HitBank][GI[HitBank]].ctr + 1); 	// prediction strength
+			tage_confidence += gtable[HitBank][GI[HitBank]].u * (HitBank > 6 ? 2 : 1); 	// prediction usefulness: weigh longer history with stronger confidence
+			if (tage_pred == alttaken) {
+				tage_confidence += (AltBank > 0) ? gtable[AltBank][GI[AltBank]].u : 1;
+			} else {
+				tage_confidence -= (AltBank > 0) ? gtable[AltBank][GI[AltBank]].u : 1;
+			}
+
+			if ( !((USE_ALT_ON_NA < 0) || (abs (2 * gtable[HitBank][GI[HitBank]].ctr + 1) > 1)) )
 				tage_pred = alttaken;
 		}
-		else
+		// take bimodal prediction if no entry found
+		else 
 		{
 			alttaken = getbim (pc);
 			tage_pred = alttaken;
 		}
 		// END TAGE prediction
 
-		predloop = getloop (pc);	// loop prediction
-		pred_taken = ((WITHLOOP >= 0) && (LVALID)) ? predloop : tage_pred;
+		loop_pred = getloop (pc);	// loop prediction
+		perceptron_pred = getperceptron (pc); 	// perceptron prediction
+
+		// select prediction taken using loop, perceptron, TAGE confidences
+		if ((WITHLOOP >= 0) && (LVALID))
+			pred_taken = loop_pred;
+		else if (tage_confidence < TAGE_CONFIDENCE_THRESHOLD && abs(perceptron_pred > PERCEPTRON_THRESHOLD))
+			pred_taken = (perceptron_pred >= 0);
+		else 
+			pred_taken = tage_pred;
+
 	}
 	
 	u.direction_prediction (pred_taken);
@@ -586,11 +665,14 @@ void update (branch_update * u, bool taken, unsigned int target)
 	{
 		// update the loop predictor
 		loopupdate (pc, taken);
-		if (LVALID)
-			if (tage_pred != predloop)
-				ctrupdate (WITHLOOP, (predloop == taken), 7);
+		if ((LVALID) && (tage_pred != loop_pred))
+			ctrupdate (WITHLOOP, (loop_pred == taken), 7);
 
-		// TAGE UPDATE  
+		// train perceptron when TAGE prediction incorrect or when perceptron was used as final predictor
+		if ( (tage_pred != taken) || (tage_confidence < TAGE_CONFIDENCE_THRESHOLD && abs(perceptron_pred > PERCEPTRON_THRESHOLD)) )
+			perceptronupdate(pc, taken);
+
+		// BEGIN TAGE UPDATE  
 		// try to allocate an entry if the prediction was wrong
 		bool ALLOC = ((tage_pred != taken) & (HitBank < NHIST));
 		if (HitBank > 0)
@@ -681,6 +763,8 @@ void update (branch_update * u, bool taken, unsigned int target)
 			else if ((USE_ALT_ON_NA < 0) && (gtable[HitBank][GI[HitBank]].u > 0))
 				gtable[HitBank][GI[HitBank]].u--;
 		}
+		// END TAGE UPDATE
+
 	}
 	// END PREDICTOR UPDATE
 
