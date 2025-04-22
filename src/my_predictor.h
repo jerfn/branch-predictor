@@ -12,50 +12,6 @@ public:
 	unsigned int index;
 };
 
-/*
-class my_predictor : public branch_predictor {
-public:
-#define HISTORY_LENGTH	15
-#define TABLE_BITS	15
-	my_update u;
-	branch_info bi;
-	unsigned int history;
-	unsigned char tab[1<<TABLE_BITS]; // array
-
-	my_predictor (void) : history(0) { // constructor, initializes history to 0
-		memset (tab, 0, sizeof (tab)); // zeroes out prediction table
-	}
-
-	branch_update *predict (branch_info & b) {
-		bi = b;
-		if (b.br_flags & BR_CONDITIONAL) { // if a conditional jump (br instead of j)
-			u.index = 
-				  (history << (TABLE_BITS - HISTORY_LENGTH)) 
-				^ (b.address & ((1<<TABLE_BITS)-1));
-			u.direction_prediction (tab[u.index] >> 1);
-		} else {
-			u.direction_prediction (true);
-		}
-		u.target_prediction (0);
-		return &u;
-	}
-
-	void update (branch_update *u, bool taken, unsigned int target) {
-		if (bi.br_flags & BR_CONDITIONAL) {
-			unsigned char *c = &tab[((my_update*)u)->index];
-			if (taken) {
-				if (*c < 3) (*c)++;
-			} else {
-				if (*c > 0) (*c)--;
-			}
-			history <<= 1;
-			history |= taken;
-			history &= (1<<HISTORY_LENGTH)-1;
-		}
-	}
-};
-*/
-
 #define HISTORY_LENGTH  64
 #define NUM_PERCEPTRONS 2048 // number of different perceptrons (1 per unique branch)
 #define MIN_WEIGHT -128
@@ -93,6 +49,7 @@ public:
 
 class my_predictor : public branch_predictor {
 public:
+#define PC_HIST_LENGTH 2
 
 	my_update u;
 	branch_info bi;
@@ -100,17 +57,32 @@ public:
 	std::bitset<HISTORY_LENGTH> ghist; // Global branch history
 	std::vector<perceptron> table;
 
+	unsigned int pc_hist[PC_HIST_LENGTH]; // recent PCs
+
 	my_predictor (void) {
 		table.resize(NUM_PERCEPTRONS);
+
+		for (int i = 0; i < PC_HIST_LENGTH; i++)
+			pc_hist[i] = 0;
 	}
 
 	branch_update *predict (branch_info & b) {
 		bi = b;
 		if (b.br_flags & BR_CONDITIONAL) { // if conditional branch
 			// u.index = b.address % NUM_PERCEPTRONS;
-			u.index = (b.address ^ ghist.to_ulong()) % NUM_PERCEPTRONS;
+			u.index = (b.address ^ ghist.to_ullong()) % NUM_PERCEPTRONS; // hash with ghist
+
+			// unsigned int hash = pc_hist[0];
+			// for (int i = 1; i < PC_HIST_LENGTH; i++)
+			// 	hash ^= pc_hist[i];
+			// u.index = (b.address ^ hash ^ ghist.to_ullong()) % NUM_PERCEPTRONS; // hash with recent PCs (path) and ghist
+
 			perceptron& p = table[u.index];
 			u.direction_prediction (p.predict(ghist) >= 0);
+
+			for (int i = PC_HIST_LENGTH - 1; i > 0; i--)
+				pc_hist[i] = pc_hist[i - 1];
+			pc_hist[0] = b.address;
 		} else {
 			u.direction_prediction (true);
 		}
