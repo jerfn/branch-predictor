@@ -7,16 +7,17 @@
 #include <bitset>
 #include <vector>
 
-class my_update : public branch_update {
-public:
-	unsigned int index;
-};
-
 #define HISTORY_LENGTH  64
-#define NUM_PERCEPTRONS 2048 // number of different perceptrons (1 per unique branch)
+#define NUM_BANKS 3
+#define NUM_PERCEPTRONS_PER_BANK 512 // number of different perceptrons (1 per unique branch)
 #define MIN_WEIGHT -128
 #define MAX_WEIGHT 127
 constexpr int THETA = (int) (1.93 * HISTORY_LENGTH + 14); // Training threshold
+
+class my_update : public branch_update {
+	public:
+		unsigned int index[NUM_BANKS];
+	};
 
 class perceptron {
 public:
@@ -55,34 +56,49 @@ public:
 	branch_info bi;
 
 	std::bitset<HISTORY_LENGTH> ghist; // Global branch history
-	std::vector<perceptron> table;
+	perceptron banks[NUM_BANKS][NUM_PERCEPTRONS_PER_BANK];
 
 	unsigned int pc_hist[PC_HIST_LENGTH]; // recent PCs
 
 	my_predictor (void) {
-		table.resize(NUM_PERCEPTRONS);
 
 		for (int i = 0; i < PC_HIST_LENGTH; i++)
 			pc_hist[i] = 0;
 	}
 
+	int get_index(unsigned int pc, int bank_id) {
+		switch (bank_id) {
+			case 0: return (pc ^ (ghist.to_ullong() & 0xFF)) % NUM_PERCEPTRONS_PER_BANK;
+			case 1: return (pc ^ (ghist.to_ullong() & 0xFFFF)) % NUM_PERCEPTRONS_PER_BANK;
+			case 2: return (pc ^ (ghist.to_ullong())) % NUM_PERCEPTRONS_PER_BANK;
+		}
+	}
+
 	branch_update *predict (branch_info & b) {
 		bi = b;
 		if (b.br_flags & BR_CONDITIONAL) { // if conditional branch
-			// u.index = b.address % NUM_PERCEPTRONS;
-			u.index = (b.address ^ ghist.to_ullong()) % NUM_PERCEPTRONS; // hash with ghist
+			// u.index = b.address % NUM_PERCEPTRONS_PER_BANK;
+			// u.index = (b.address ^ ghist.to_ullong()) % NUM_PERCEPTRONS_PER_BANK; // hash with ghist
 
 			// unsigned int hash = pc_hist[0];
 			// for (int i = 1; i < PC_HIST_LENGTH; i++)
 			// 	hash ^= pc_hist[i];
-			// u.index = (b.address ^ hash ^ ghist.to_ullong()) % NUM_PERCEPTRONS; // hash with recent PCs (path) and ghist
+			// u.index = (b.address ^ hash ^ ghist.to_ullong()) % NUM_PERCEPTRONS_PER_BANK; // hash with recent PCs (path) and ghist
 
-			perceptron& p = table[u.index];
-			u.direction_prediction (p.predict(ghist) >= 0);
+			int votes = 0;
+
+			for (int i = 0; i < NUM_BANKS; i++) {
+				u.index[i] = get_index(b.address, i);
+				perceptron& p = banks[i][u.index[i]];
+				votes += (p.predict(ghist) >= 0 ? 1 : 0);
+			}
+
+			u.direction_prediction (votes >= NUM_BANKS / 2); // majority vote
 
 			for (int i = PC_HIST_LENGTH - 1; i > 0; i--)
 				pc_hist[i] = pc_hist[i - 1];
 			pc_hist[0] = b.address;
+
 		} else {
 			u.direction_prediction (true);
 		}
@@ -92,11 +108,14 @@ public:
 
 	void update (branch_update *u, bool taken, unsigned int target) {
 		if (bi.br_flags & BR_CONDITIONAL) { // if conditional branch
-			perceptron& p = table[((my_update*)u)->index];
-			int output = p.predict(ghist);
 
-			if ((output >= 0) != taken || std::abs(output) <= THETA) {
-				p.train(ghist, taken);
+			for (int i = 0; i < NUM_BANKS; i++) {
+				perceptron& p = banks[i][((my_update*)u)->index[i]];
+				int output = p.predict(ghist);
+
+				if ((output >= 0) != taken || std::abs(output) <= THETA) {
+					p.train(ghist, taken);
+				}
 			}
 			
 			ghist <<= 1;
