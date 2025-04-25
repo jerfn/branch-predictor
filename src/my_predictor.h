@@ -1,8 +1,10 @@
 // my_predictor.h
-// This file contains a sample my_predictor class.
-// It is a simple 32,768-entry gshare with a history length of 15.
-// Note that this predictor doesn't use the whole 32 kilobytes available
-// for the CBP-2 contest; it is just an example.
+
+/* STORAGE REQUIREMENT
+ * 2048 perceptrons * (64 weights + 1 bias) * 8 bits
+ * 64 bits global history
+ * TOTAL = 130 KB + 8 B
+ */
 
 #include <bitset>
 #include <vector>
@@ -13,7 +15,8 @@ public:
 };
 
 #define HISTORY_LENGTH  64
-#define NUM_PERCEPTRONS 2048 // number of different perceptrons (1 per unique branch)
+#define PC_HIST_LENGTH 2
+#define NUM_PERCEPTRONS 2048 // number of different perceptron predictors
 #define MIN_WEIGHT -128
 #define MAX_WEIGHT 127
 constexpr int THETA = (int) (1.93 * HISTORY_LENGTH + 14); // Training threshold
@@ -21,7 +24,7 @@ constexpr int THETA = (int) (1.93 * HISTORY_LENGTH + 14); // Training threshold
 class perceptron {
 public:
 	int8_t weights[HISTORY_LENGTH]; // using int8_t for weights, -128 to 127
-	int bias;
+	int8_t bias;
 
 	perceptron () {
 		for (int i = 0; i < HISTORY_LENGTH; i++)
@@ -49,13 +52,12 @@ public:
 
 class my_predictor : public branch_predictor {
 public:
-#define PC_HIST_LENGTH 2
 
 	my_update u;
 	branch_info bi;
 
 	std::bitset<HISTORY_LENGTH> ghist; // Global branch history
-	std::vector<perceptron> table;
+	std::vector<perceptron> table; // Table of perceptrons
 
 	unsigned int pc_hist[PC_HIST_LENGTH]; // recent PCs
 
@@ -69,20 +71,27 @@ public:
 	branch_update *predict (branch_info & b) {
 		bi = b;
 		if (b.br_flags & BR_CONDITIONAL) { // if conditional branch
+			// Hash with PC only
 			// u.index = b.address % NUM_PERCEPTRONS;
-			u.index = (b.address ^ ghist.to_ullong()) % NUM_PERCEPTRONS; // hash with ghist
 
-			// unsigned int hash = pc_hist[0];
-			// for (int i = 1; i < PC_HIST_LENGTH; i++)
+			// Hash with PC and global history
+			u.index = (b.address ^ ghist.to_ullong()) % NUM_PERCEPTRONS;
+
+			// Hash with recent PCs (path) and global history
+			// unsigned int hash = b.address;
+			// for (int i = 0; i < PC_HIST_LENGTH; i++)
 			// 	hash ^= pc_hist[i];
-			// u.index = (b.address ^ hash ^ ghist.to_ullong()) % NUM_PERCEPTRONS; // hash with recent PCs (path) and ghist
+			// u.index = (hash ^ ghist.to_ullong()) % NUM_PERCEPTRONS;
 
+			// Index into perceptron table and predict
 			perceptron& p = table[u.index];
 			u.direction_prediction (p.predict(ghist) >= 0);
 
+			// Update PC history array
 			for (int i = PC_HIST_LENGTH - 1; i > 0; i--)
 				pc_hist[i] = pc_hist[i - 1];
 			pc_hist[0] = b.address;
+
 		} else {
 			u.direction_prediction (true);
 		}
@@ -95,10 +104,12 @@ public:
 			perceptron& p = table[((my_update*)u)->index];
 			int output = p.predict(ghist);
 
+			// Train if mispredict or output is less than threshold
 			if ((output >= 0) != taken || std::abs(output) <= THETA) {
 				p.train(ghist, taken);
 			}
 			
+			// Update ghist
 			ghist <<= 1;
 			ghist.set(0, taken); // Sets LSB to taken
 		}
