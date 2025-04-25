@@ -6,6 +6,14 @@ Code has been largely inspired  by the tagged PPM predictor simulator from Pierr
 #include <inttypes.h>
 #include <math.h>
 #include <algorithm>
+#include <bitset>
+#include <vector>
+#include <cstring>
+
+class my_update : public branch_update {
+public:
+	unsigned int index;
+};
 
 //a limit predictor for 256Kbits: no AHEAD pipelining, 13 components
 #define NHIST 12		//12 tagged components
@@ -21,12 +29,13 @@ Code has been largely inspired  by the tagged PPM predictor simulator from Pierr
 #define LOGL 8			
 #define WIDTHNBITERLOOP 14
 
-// static length perceptron 
-#define P_LENGTH 64		// perceptron length
-#define WEIGHT_BITS 8	// using int8_t for weights
-#define TAGE_CONFIDENCE_THRESHOLD -2 // if TAGE confidence is less than this value and perceptron prediction above threshold, use perceptron prediction.
-#define PERCEPTRON_THRESHOLD 110		// threshold to use perceptron prediction
-// #define THRESHOLD_TESTING // define to test perceptron prediction threshold (removes TAGE fallback)
+#define HISTORY_LENGTH  64
+#define NUM_PERCEPTRONS 2048 // number of different perceptrons (1 per unique branch)
+#define MIN_WEIGHT -128
+#define MAX_WEIGHT 127
+constexpr int THETA = (int) (1.93 * HISTORY_LENGTH + 14); // Training threshold
+
+#define TAGE_CONFIDENCE_THRESHOLD 6 // TAGE confidence threshold for perceptron prediction
 
 // Total storage for the L-TAGE predictor
 // TAGE
@@ -73,12 +82,41 @@ void update (uint8_t * h)
 }
 };
 
+class perceptron {
+public:
+	int8_t weights[HISTORY_LENGTH]; // using int8_t for weights, -128 to 127
+	int bias;
+
+	perceptron () {
+		for (int i = 0; i < HISTORY_LENGTH; i++)
+			weights[i] = 0;
+		bias = 0;
+	}
+
+	int predict(const std::bitset<HISTORY_LENGTH>& ghist) const {
+		int y = bias;
+		for (int i = 0; i < HISTORY_LENGTH; i++) {
+			int input = ghist[i] ? 1 : -1;
+			y += weights[i] * input;
+		}
+		return y;
+	}
+	
+	void train(const std::bitset<HISTORY_LENGTH>& ghist, bool taken) {
+		for (int i = 0; i < HISTORY_LENGTH; i++) {
+			int correction = (ghist[i] == taken ? 1 : -1); // increment if branch outcome agrees w/ ith history input, else decrement
+			weights[i] = std::max(MIN_WEIGHT, std::min(MAX_WEIGHT, weights[i] + correction));
+		}
+		bias = std::max(MIN_WEIGHT, std::min(MAX_WEIGHT, bias + (taken ? 1 : -1)));
+	}
+};
 
 class my_predictor:public branch_predictor
 {
 public:
-branch_update u;
+my_update u;
 branch_info bi;
+#define PC_HIST_LENGTH 2
 
 // loop predictor entry
 class lentry			
@@ -131,18 +169,9 @@ public:
 };
 
 // perceptron 
-class perceptron
-{
-public:
-	int8_t weights[P_LENGTH];
-	int bias;
-	perceptron () 
-	{
-		for (int i = 0; i < P_LENGTH; i++)
-			weights[i] = 0;
-		bias = 0;
-	}
-};
+std::bitset<HISTORY_LENGTH> ghist_percep; // Global branch history for perceptron
+std::vector<perceptron> ptable;
+unsigned int pc_hist[PC_HIST_LENGTH]; // recent PCs
 
 int USE_ALT_ON_NA;		// "Use alternate prediction on newly allocated":  a 4-bit counter  to determine whether the newly allocated entries should be considered as  valid or not for delivering  the prediction
 
@@ -169,7 +198,6 @@ folded_history ch_tos[2][NHIST + 1];	// utility for computing TAGE tags on kerne
 lentry *ltable;		// loop predictor table
 bentry *btable;		// bimodal TAGE table
 gentry *gtable[NHIST + 1];	// tagged TAGE tables
-perceptron perry;
 
 int TB[NHIST + 1];		// tag width for the different tagged tables
 int m[NHIST + 1];		// used for storing the history lengths
@@ -186,13 +214,13 @@ int HitBank;			// longest matching bank
 int AltBank;			// alternate matching bank
 
 bool loop_pred;		// loop predictor prediction
-int perceptron_pred;	// perceptron prediction
-bool perceptron_used; 	// perceptron prediction used
 int LI;			//index of the loop predictor
 int LHIT;			//hitting way in the loop predictor
 int LTAG;			//tag on the loop predictor
 bool LVALID;			// validity of the loop predictor prediction
 int8_t WITHLOOP;		// counter to monitor whether or not loop prediction is beneficial
+
+int percep_pred;	// perceptron prediction
 
 // BEGIN PREDICTOR INITIALIZATION
 my_predictor (void)
@@ -272,7 +300,9 @@ my_predictor (void)
 	}
 
 	// initialization of perceptron
-	perry = perceptron ();
+	ptable.resize(NUM_PERCEPTRONS);
+	for (int i = 0; i < PC_HIST_LENGTH; i++)
+		pc_hist[i] = 0;
 
 //#define PRINTCHAR
 #ifdef PRINTCHAR
@@ -504,34 +534,6 @@ void loopupdate (address_t pc, bool Taken)
 	}
 }
 
-// calculate perceptron prediction 
-int getperceptron (address_t pc)
-{
-	int sum = perry.bias;
-	for (int i = 0; i < P_LENGTH; i++)
-	{
-		int input = ghist[i] ? 1 : -1;
-		sum += input * perry.weights[i];
-	}
-	return sum;
-}
-
-void perceptronupdate (address_t pc, bool Taken)
-{
-	int prediction = getperceptron (pc);
-	bool predicted = prediction >= 0;
-	if (predicted == Taken && abs(prediction) > PERCEPTRON_THRESHOLD)
-		return; // correct prediction & confident, no additional training needed
-	
-	int target = Taken ? 1 : -1;
-	for (int i = 0; i < P_LENGTH; i++) 
-	{
-		int input = ghist[i] ? 1 : -1;
-		perry.weights[i] = std::clamp(perry.weights[i] + target * input, -127, 127);
-	}
-	perry.bias = std::clamp(perry.bias + target, -127, 127);
-}
-
 // shifting the global history:  we manage the history in a big table in order to reduce simulation time
 void updateghist (uint8_t * &h, bool dir, uint8_t * tab, int &PT)
 {
@@ -564,6 +566,17 @@ branch_update *predict (branch_info & b)
 	// predict only on conditional branches
 	if (b.br_flags & BR_CONDITIONAL)
 	{
+		// BEGIN PERCEPTRON PREDICTION
+		u.index = (b.address ^ ghist_percep.to_ullong()) % NUM_PERCEPTRONS; // hash with ghist
+
+		perceptron& p = ptable[u.index];
+		percep_pred = p.predict(ghist_percep); // perceptron prediction
+
+		for (int i = PC_HIST_LENGTH - 1; i > 0; i--)
+			pc_hist[i] = pc_hist[i - 1];
+		pc_hist[0] = b.address;
+		// END PERCEPTRON PREDICTION		
+
 		// BEGIN TAGE PREDICTION
 		BI = pc & ((1 << LOGB) - 1);
 		HitBank = 0;
@@ -611,6 +624,7 @@ branch_update *predict (branch_info & b)
 				alttaken = (gtable[AltBank][GI[AltBank]].ctr >= 0);
 			else
 				alttaken = getbim (pc);
+				// alttaken = percep_pred >= 0; // take perceptron prediction if no entry found
 
 			// if the entry is recognized as a newly allocated entry and 
 			// USE_ALT_ON_NA is positive use the alternate prediction
@@ -633,35 +647,27 @@ branch_update *predict (branch_info & b)
 		else 
 		{
 			alttaken = getbim (pc);
+			// alttaken = percep_pred >= 0; // take perceptron prediction if no entry found
 			tage_pred = alttaken;
 		}
 		// END TAGE prediction
 
 		loop_pred = getloop (pc);	// loop prediction
-		perceptron_pred = getperceptron (pc); 	// perceptron prediction
-		perceptron_used = false;
 
 		// select prediction taken using loop, perceptron, TAGE confidences
 		if ((WITHLOOP >= 0) && (LVALID))
 			pred_taken = loop_pred;
-	#ifdef THRESHOLD_TESTING
-		else if (1)
-		{
-			pred_taken = (perceptron_pred >= 0);
-			perceptron_used = true;
-		}
-	#endif
-		else if (tage_confidence < TAGE_CONFIDENCE_THRESHOLD && abs(perceptron_pred > PERCEPTRON_THRESHOLD))
-		{
-			pred_taken = (perceptron_pred >= 0);
-			perceptron_used = true;
-		}
+		// else if (tage_confidence < TAGE_CONFIDENCE_THRESHOLD)
+		// 	pred_taken = (percep_pred >= 0);
 		else 
 			pred_taken = tage_pred;
 
 	}
-	
+
+	// fprintf(stderr, "PC: %x, TAGE: %d, ALT: %d, CONF: %d, PERCEP: %d\n", pc, tage_pred, alttaken, tage_confidence, percep_pred);
+	fprintf(stderr, "%x, %d, %d, %d, %d,\n", pc, tage_pred, alttaken, tage_confidence, percep_pred);
 	u.direction_prediction (pred_taken);
+	// u.direction_prediction (percep_pred >= 0);
 	u.target_prediction (0);
 	return &u;
 }
@@ -681,9 +687,13 @@ void update (branch_update * u, bool taken, unsigned int target)
 		if ((LVALID) && (tage_pred != loop_pred))
 			ctrupdate (WITHLOOP, (loop_pred == taken), 7);
 
-		// train perceptron when TAGE prediction incorrect or when perceptron was used as final predictor
-		if ( (tage_pred != taken) || (perceptron_used) )
-			perceptronupdate(pc, taken);
+		// update the perceptron predictor
+		perceptron& p = ptable[((my_update*)u)->index];
+		int percep_pred = p.predict(ghist_percep); 
+		if ((percep_pred >= 0) != taken || std::abs(percep_pred) <= THETA) {
+			p.train(ghist_percep, taken);
+		}
+
 
 		// BEGIN TAGE UPDATE  
 		// try to allocate an entry if the prediction was wrong
@@ -815,6 +825,10 @@ void update (branch_update * u, bool taken, unsigned int target)
 		ch_tos[0][i].update (ghistos);
 		ch_tos[1][i].update (ghistos);
 	}
+
+	// upate perceptron history
+	ghist_percep <<= 1;
+	ghist_percep.set(0, taken);
 	// END UPDATE HISTORIES
 
 }
