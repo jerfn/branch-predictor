@@ -35,7 +35,7 @@ public:
 #define MAX_WEIGHT 127
 constexpr int THETA = (int) (1.93 * HISTORY_LENGTH + 14); // Training threshold
 
-#define TAGE_CONFIDENCE_THRESHOLD 6 // TAGE confidence threshold for perceptron prediction
+#define TAGE_CONFIDENCE_THRESHOLD 4 // TAGE confidence: ranges from 1 to 7, 1 is weak, 3 is nearly weak; these will be replaced by perceptron prediction
 
 // Total storage for the L-TAGE predictor
 // TAGE
@@ -148,8 +148,8 @@ public:
 	int8_t pred;
 	bentry ()
 	{
-		pred = 0;
-		hyst = 1;
+		pred = 0;	// 1-bit prediction counter
+		hyst = 1;	// 1-bit hysteresis counter: shared between 4 entries, decreasing storage cost and enabling effective 2-bit prediction strength counter 
 	}
 };
 
@@ -554,7 +554,7 @@ int MYRANDOM ()
 {
 	Seed++;
 	return (Seed & 3);
-};
+}
 
 // BEGIN PREDICTION 
 branch_update *predict (branch_info & b)
@@ -617,6 +617,8 @@ branch_update *predict (branch_info & b)
 				break;
 			}
 		}
+
+		tage_confidence = 1;	// reset confidence value
 		// computes the prediction and the alternate prediction
 		if (HitBank > 0)
 		{
@@ -630,23 +632,26 @@ branch_update *predict (branch_info & b)
 			// USE_ALT_ON_NA is positive use the alternate prediction
 			tage_pred = (gtable[HitBank][GI[HitBank]].ctr >= 0);
 
-			// calculate some confidence value (might be mickey)
-			// max confidence of 16 (+4 from strength, +3*2 from useful and long history, +3 from matching alt prediction)
-			tage_confidence = abs(gtable[HitBank][GI[HitBank]].ctr + 1); 	// prediction strength
-			tage_confidence += gtable[HitBank][GI[HitBank]].u * (HitBank > 6 ? 2 : 1); 	// prediction usefulness: weigh longer history with stronger confidence
-			if (tage_pred == alttaken) {
-				tage_confidence += (AltBank > 0) ? gtable[AltBank][GI[AltBank]].u : 1;
-			} else {
-				tage_confidence -= (AltBank > 0) ? gtable[AltBank][GI[AltBank]].u : 1;
-			}
+			// calculate some confidence value using |2*ctr + 1| (range from 1 to 7)
+			// confidence 1 is weak, 3 is nearly weak; these will be replaced by perceptron prediction
+			tage_confidence = abs(2 * gtable[HitBank][GI[HitBank]].ctr + 1); 	// prediction strength
+
 
 			if ( !((USE_ALT_ON_NA < 0) || (abs (2 * gtable[HitBank][GI[HitBank]].ctr + 1) > 1)) )
+			{
 				tage_pred = alttaken;
+				if (AltBank > 0)
+					tage_confidence = abs(2 * gtable[AltBank][GI[AltBank]].ctr + 1); // prediction strength
+				else 
+					tage_confidence = ( btable[BI].pred ^ btable[BI >> HYSTSHIFT].hyst ) ? 1 : 5; // bimodal prediction strength: strong if {ctr, hyst} = 2'b00 or 2'b11
+			}
+
 		}
 		// take bimodal prediction if no entry found
 		else 
 		{
 			alttaken = getbim (pc);
+			tage_confidence = ( btable[BI].pred ^ btable[BI >> HYSTSHIFT].hyst ) ? 1 : 5; // bimodal prediction strength
 			// alttaken = percep_pred >= 0; // take perceptron prediction if no entry found
 			tage_pred = alttaken;
 		}
@@ -657,15 +662,15 @@ branch_update *predict (branch_info & b)
 		// select prediction taken using loop, perceptron, TAGE confidences
 		if ((WITHLOOP >= 0) && (LVALID))
 			pred_taken = loop_pred;
-		// else if (tage_confidence < TAGE_CONFIDENCE_THRESHOLD)
-		// 	pred_taken = (percep_pred >= 0);
+		else if (tage_confidence < TAGE_CONFIDENCE_THRESHOLD)
+			pred_taken = (percep_pred >= 0);
 		else 
 			pred_taken = tage_pred;
 
 	}
 
 	// fprintf(stderr, "PC: %x, TAGE: %d, ALT: %d, CONF: %d, PERCEP: %d\n", pc, tage_pred, alttaken, tage_confidence, percep_pred);
-	fprintf(stderr, "%x, %d, %d, %d, %d,\n", pc, tage_pred, alttaken, tage_confidence, percep_pred);
+	// fprintf(stderr, "%x, %d, %d, %d, %d,\n", pc, tage_pred, alttaken, tage_confidence, percep_pred);
 	u.direction_prediction (pred_taken);
 	// u.direction_prediction (percep_pred >= 0);
 	u.target_prediction (0);
