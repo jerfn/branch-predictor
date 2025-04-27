@@ -35,5 +35,8 @@
 *.DS_Store
 *.dSYM
 
-# vscode stuff
+# vscode
 .vscode
+
+# binary
+src/predict
